@@ -9,8 +9,8 @@ name = "nu_plugin_nude"
 path = "src/main.rs"
 
 [dependencies]
-nu-plugin = "0.114"
-nu-protocol = "0.114"
+nu-plugin = "0.115"
+nu-protocol = "0.115"
 bollard = "0.21"
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
