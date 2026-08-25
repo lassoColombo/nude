@@ -62,6 +62,7 @@ impl SimplePluginCommand for NetworkLsCommand {
     ) -> Result<Value, LabeledError> {
         plugin.block_on_labeled(run_list(plugin, call))
     }
+}
 
 impl SimplePluginCommand for NetworkInspectCommand {
     type Plugin = NudePlugin;
