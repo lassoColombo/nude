@@ -57,7 +57,7 @@ Inspecting data from the docker cli looks to much like this:
 docker top web | awk 'NR>1 { print $2, $8 }'    # Get each process's PID and command from a container
 # Does not actually work
 ```
-I wish I could just `docker top web | select pid cmd`
+I wish I could just `docker top web | select pid command`
 
 ## So what?
 Nude talks directly with the docker daemon in pure rust, using [bollard](https://crates.io/crates/bollard), to retrieve structured objects and typed data, so we can run things like:
@@ -260,9 +260,10 @@ Running processes in a container (like `docker top`)
 
 **Flags**
 
-| Flag             | Type     | Description                                               |
-| ---------------- | -------- | --------------------------------------------------------- |
-| `--output`, `-o` | `string` | Output format: compact \| wide \| full (default: compact) |
+| Flag             | Type     | Description                                                                       |
+| ---------------- | -------- | --------------------------------------------------------------------------------- |
+| `--output`, `-o` | `string` | Output format: compact \| wide \| full (default: compact)                         |
+| `--ps-args`      | `string` | Arguments for the host's `ps` (default: a typed column set; docker's own is `-ef`) |
 
 ### `nude diff`
 
@@ -533,9 +534,10 @@ Running processes in a container (alias of `container top`)
 
 **Flags**
 
-| Flag             | Type     | Description                                               |
-| ---------------- | -------- | --------------------------------------------------------- |
-| `--output`, `-o` | `string` | Output format: compact \| wide \| full (default: compact) |
+| Flag             | Type     | Description                                                                       |
+| ---------------- | -------- | --------------------------------------------------------------------------------- |
+| `--output`, `-o` | `string` | Output format: compact \| wide \| full (default: compact)                         |
+| `--ps-args`      | `string` | Arguments for the host's `ps` (default: a typed column set; docker's own is `-ef`) |
 
 ### `nude version`
 
@@ -613,8 +615,8 @@ nude ps -o wide
 nude ps
 | each {|c| nude top $c.name | insert container $c.name }
 | flatten
-| where pid == "69046"
-| select container uid pid cmd
+| where pid == 69046
+| select container user pid command started cpu_time
 ```
 
 #### Audit write access to the host.
