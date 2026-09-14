@@ -66,7 +66,6 @@ Nude talks directly with the docker daemon in pure rust, using [bollard](https:/
 nude history postgres:16
 | where size > 10mb
 | sort-by size --reverse
-| select size created_by
 ```
 
 - **Nude does not reimplement all of docker.** It covers the introspection commands that benefit the most from structured data.
