@@ -12,6 +12,7 @@ use crate::commands::detail::{ContainerDiffCommand, ContainerTopCommand, ImageHi
 use crate::commands::image::{ImageInspectCommand, ImageLsCommand};
 use crate::commands::network::{NetworkInspectCommand, NetworkLsCommand};
 use crate::commands::plugin::{PluginInspectCommand, PluginLsCommand};
+use crate::commands::search::SearchCommand;
 use crate::commands::system::{SystemInfoCommand, VersionCommand};
 use crate::commands::volume::{VolumeInspectCommand, VolumeLsCommand};
 
@@ -67,7 +68,7 @@ impl Plugin for NudePlugin {
             Box::new(ContainerTopCommand),
             Box::new(ImageLsCommand),
             Box::new(ImageInspectCommand),
-            Box::new(crate::commands::search::SearchCommand),
+            Box::new(SearchCommand),
             Box::new(ImageHistoryCommand),
             Box::new(NetworkLsCommand),
             Box::new(NetworkInspectCommand),

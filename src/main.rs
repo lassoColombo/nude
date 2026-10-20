@@ -1,6 +1,5 @@
 mod commands;
 mod completers;
-mod decorators;
 mod helpers;
 mod output;
 mod plugin;

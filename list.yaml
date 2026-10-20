@@ -164,9 +164,13 @@ object_detail:
   - name: container top # ✅ implemented & verified (parity vs `docker top`)
     source_fn: top_processes # ContainerTopResponse {titles, processes}
     compact_notes: >
-      one row per process, columns = the lowercased ps titles (uid/pid/…/cmd); cells
-      kept as strings (ps output is text). full = raw {titles, processes}. Requires a
-      RUNNING container (errors otherwise, like docker).
+      one row per process. compact/wide ask the host `ps` for a fixed column set
+      (PS_COMPACT / PS_WIDE) and type each title via PS_COLUMNS: pid/ppid→int,
+      %cpu/%mem→float, rss/vsz→filesize (KiB), time→duration, etimes→`started` date,
+      stat→state name, tty `?`→nothing; unknown titles fall through as lowercased
+      strings. --ps-args overrides the column set; a `ps` without `-o` (busybox) falls
+      back to docker's `-ef`. full = raw {titles, processes}. Requires a RUNNING
+      container (errors otherwise, like docker).
   - name: image history # ✅ implemented & verified (parity vs `docker history`)
     source_fn: image_history # Vec<ImageHistoryResponseItem>
     compact_notes: >

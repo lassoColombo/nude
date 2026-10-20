@@ -1,14 +1,13 @@
 use bollard::models::{Network, NetworkInspect};
 use bollard::query_parameters::ListNetworksOptionsBuilder;
 use futures::future::join_all;
-use nu_plugin::{DynamicCompletionCall, EngineInterface, EvaluatedCall, SimplePluginCommand};
-use nu_protocol::{
-    engine::ArgType, DynamicSuggestion, LabeledError, Record, Signature, Span, Value,
-};
+use nu_plugin::{EngineInterface, EvaluatedCall, SimplePluginCommand};
+use nu_protocol::{DynamicSuggestion, LabeledError, Record, Signature, Span, Value};
 
-use crate::completers;
-use crate::decorators::Decorators;
-use crate::helpers::{full_value, opt_bool, opt_rfc3339, short_id, str_map, str_opt};
+use crate::completers::{self, dynamic_completion};
+use crate::helpers::{
+    full_value, opt_bool, opt_rfc3339, opt_short_id, push_labels, skip_vanished, str_map, str_opt,
+};
 use crate::output::OutputFormat;
 use crate::plugin::NudePlugin;
 use crate::scaffold::{self, CommandSpec, FilterArg};
@@ -62,6 +61,26 @@ impl SimplePluginCommand for NetworkLsCommand {
     ) -> Result<Value, LabeledError> {
         plugin.block_on_labeled(run_list(plugin, call))
     }
+
+    dynamic_completion!(
+        |plugin, call, arg_type| completers::flags(arg_type, |flag| match flag {
+            // Closed enums → static lists.
+            "driver" => Some(completers::from_pairs(DRIVERS)),
+            "scope" => Some(completers::from_pairs(SCOPES)),
+            "type" => Some(completers::from_pairs(TYPES)),
+            // Network references → live names/ids.
+            "name" => complete_names(plugin),
+            "id" => complete_ids(plugin),
+            "labels" => completers::complete_labels(
+                &call,
+                all_networks(plugin)?
+                    .iter()
+                    .filter_map(|n| n.labels.as_ref()),
+            ),
+            // dangling has no useful completion.
+            _ => None,
+        })
+    );
 }
 
 impl SimplePluginCommand for NetworkInspectCommand {
@@ -89,20 +108,11 @@ impl SimplePluginCommand for NetworkInspectCommand {
         plugin.block_on_labeled(run_inspect(plugin, call))
     }
 
-    #[allow(
-        deprecated,
-        reason = "ExperimentalMarker gates an experimental API we opt into"
-    )]
-    fn get_dynamic_completion(
-        &self,
-        plugin: &Self::Plugin,
-        _engine: &EngineInterface,
-        _call: DynamicCompletionCall,
-        arg_type: ArgType,
-        _experimental: nu_protocol::engine::ExperimentalMarker,
-    ) -> Option<Vec<DynamicSuggestion>> {
-        completers::ref_and_output(plugin, arg_type, complete_names)
-    }
+    dynamic_completion!(|plugin, call, arg_type| completers::ref_and_output(
+        plugin,
+        arg_type,
+        complete_names
+    ));
 }
 
 const DRIVERS: &[(&str, &str)] = &[
@@ -162,9 +172,9 @@ fn complete_ids(plugin: &NudePlugin) -> Option<Vec<DynamicSuggestion>> {
 }
 
 async fn run_list(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Result<Value> {
-    let decorators = Decorators::from_call(call)?;
+    let show_labels = call.has_flag("show-labels")?;
     let span = call.head;
-    let fmt = scaffold::output_format(call, false)?;
+    let fmt = scaffold::list_format(call)?;
 
     let docker = plugin.docker()?;
     let filters = scaffold::collect_filters(call, FILTERS)?;
@@ -172,65 +182,56 @@ async fn run_list(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Result<V
         .filters(&filters)
         .build();
     let networks = docker.list_networks(Some(opts)).await?;
-    match fmt {
-        OutputFormat::Compact => Ok(Value::list(
-            networks
-                .iter()
-                .map(|n| compact(n, span, decorators))
-                .collect(),
-            span,
-        )),
-        _ => {
-            let ids: Vec<String> = networks.into_iter().filter_map(|n| n.id).collect();
-            let inspected = join_all(ids.iter().map(|id| docker.inspect_network(id, None))).await;
-            let rows: Vec<Value> = inspected
-                .into_iter()
-                .filter_map(Result::ok)
-                .map(|r| match fmt {
-                    OutputFormat::Full => full_value(&r, span),
-                    _ => wide(&r, span, decorators),
-                })
-                .collect();
-            Ok(Value::list(rows, span))
-        }
+    if fmt == OutputFormat::Compact {
+        let rows = networks
+            .iter()
+            .map(|n| compact(n, span, show_labels))
+            .collect();
+        return Ok(Value::list(rows, span));
     }
+
+    let ids: Vec<String> = networks.into_iter().filter_map(|n| n.id).collect();
+    let inspected =
+        skip_vanished(join_all(ids.iter().map(|id| docker.inspect_network(id, None))).await)?;
+    let rows = inspected
+        .iter()
+        .map(|r| match fmt {
+            OutputFormat::Full => full_value(r, span),
+            _ => wide(r, span, show_labels),
+        })
+        .collect();
+    Ok(Value::list(rows, span))
 }
 
 async fn run_inspect(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Result<Value> {
     let name: String = call.req(0)?;
-    let decorators = Decorators::from_call(call)?;
+    let show_labels = call.has_flag("show-labels")?;
     let span = call.head;
-    let fmt = scaffold::output_format(call, true)?;
+    let fmt = scaffold::inspect_format(call)?;
 
     let resp = plugin.docker()?.inspect_network(&name, None).await?;
     Ok(match fmt {
         OutputFormat::Full => full_value(&resp, span),
-        _ => wide(&resp, span, decorators),
+        _ => wide(&resp, span, show_labels),
     })
 }
 
-fn compact(n: &Network, span: Span, decorators: Decorators) -> Value {
+fn compact(n: &Network, span: Span, show_labels: bool) -> Value {
     let mut rec = Record::new();
     rec.push("name", str_opt(n.name.as_deref(), span));
-    rec.push(
-        "id",
-        str_opt(n.id.as_deref().map(short_id).as_deref(), span),
-    );
+    rec.push("id", opt_short_id(n.id.as_deref(), span));
     rec.push("driver", str_opt(n.driver.as_deref(), span));
     rec.push("scope", str_opt(n.scope.as_deref(), span));
     rec.push("internal", opt_bool(n.internal, span));
     rec.push("created", opt_rfc3339(n.created.as_deref(), span));
-    decorators.apply_labels(&mut rec, n.labels.as_ref(), span);
+    push_labels(&mut rec, show_labels, n.labels.as_ref(), span);
     Value::record(rec, span)
 }
 
-fn wide(n: &NetworkInspect, span: Span, decorators: Decorators) -> Value {
+fn wide(n: &NetworkInspect, span: Span, show_labels: bool) -> Value {
     let mut rec = Record::new();
     rec.push("name", str_opt(n.name.as_deref(), span));
-    rec.push(
-        "id",
-        str_opt(n.id.as_deref().map(short_id).as_deref(), span),
-    );
+    rec.push("id", opt_short_id(n.id.as_deref(), span));
     rec.push("driver", str_opt(n.driver.as_deref(), span));
     rec.push("scope", str_opt(n.scope.as_deref(), span));
     rec.push("internal", opt_bool(n.internal, span));
@@ -240,7 +241,7 @@ fn wide(n: &NetworkInspect, span: Span, decorators: Decorators) -> Value {
     rec.push("ipam", ipam_value(n, span));
     rec.push("options", str_map(n.options.as_ref(), span));
     rec.push("containers", containers_value(n, span));
-    decorators.apply_labels(&mut rec, n.labels.as_ref(), span);
+    push_labels(&mut rec, show_labels, n.labels.as_ref(), span);
     Value::record(rec, span)
 }
 
@@ -269,12 +270,15 @@ fn ipam_value(n: &NetworkInspect, span: Span) -> Value {
     Value::record(rec, span)
 }
 
+/// Connected containers in name order (the daemon keys them by id in a map).
 fn containers_value(n: &NetworkInspect, span: Span) -> Value {
     let Some(map) = n.containers.as_ref() else {
         return Value::list(vec![], span);
     };
-    let rows = map
-        .values()
+    let mut entries: Vec<_> = map.values().collect();
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    let rows = entries
+        .into_iter()
         .map(|e| {
             let mut r = Record::new();
             r.push("name", str_opt(e.name.as_deref(), span));

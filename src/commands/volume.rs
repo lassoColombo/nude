@@ -2,14 +2,13 @@ use std::collections::BTreeSet;
 
 use bollard::models::Volume;
 use bollard::query_parameters::ListVolumesOptionsBuilder;
-use nu_plugin::{DynamicCompletionCall, EngineInterface, EvaluatedCall, SimplePluginCommand};
-use nu_protocol::{
-    engine::ArgType, DynamicSuggestion, LabeledError, Record, Signature, Span, Value,
-};
+use nu_plugin::{EngineInterface, EvaluatedCall, SimplePluginCommand};
+use nu_protocol::{DynamicSuggestion, LabeledError, Record, Signature, Span, Value};
 
-use crate::completers;
-use crate::decorators::Decorators;
-use crate::helpers::{enum_opt, full_value, opt_filesize, opt_int, opt_rfc3339, str_map, str_opt};
+use crate::completers::{self, dynamic_completion};
+use crate::helpers::{
+    enum_opt, full_value, opt_filesize, opt_int, opt_rfc3339, push_labels, str_map, str_opt,
+};
 use crate::output::OutputFormat;
 use crate::plugin::NudePlugin;
 use crate::scaffold::{self, CommandSpec, FilterArg};
@@ -58,32 +57,15 @@ impl SimplePluginCommand for VolumeLsCommand {
         plugin.block_on_labeled(run_list(plugin, call))
     }
 
-    #[allow(
-        deprecated,
-        reason = "ExperimentalMarker gates an experimental API we opt into"
-    )]
-    fn get_dynamic_completion(
-        &self,
-        plugin: &Self::Plugin,
-        _engine: &EngineInterface,
-        call: DynamicCompletionCall,
-        arg_type: ArgType,
-        _experimental: nu_protocol::engine::ExperimentalMarker,
-    ) -> Option<Vec<DynamicSuggestion>> {
-        match arg_type {
-            ArgType::Flag(name) => match name.as_ref() {
-                "output" | "o" => Some(completers::from_pairs(OutputFormat::ALL)),
-                "driver" => complete_drivers(plugin),
-                "name" => complete_names(plugin),
-                "labels" => completers::complete_labels(
-                    &call,
-                    all_volumes(plugin)?.iter().map(|v| &v.labels),
-                ),
-                _ => None,
-            },
+    dynamic_completion!(
+        |plugin, call, arg_type| completers::flags(arg_type, |flag| match flag {
+            "driver" => complete_drivers(plugin),
+            "name" => complete_names(plugin),
+            "labels" =>
+                completers::complete_labels(&call, all_volumes(plugin)?.iter().map(|v| &v.labels),),
             _ => None,
-        }
-    }
+        })
+    );
 }
 
 impl SimplePluginCommand for VolumeInspectCommand {
@@ -111,20 +93,11 @@ impl SimplePluginCommand for VolumeInspectCommand {
         plugin.block_on_labeled(run_inspect(plugin, call))
     }
 
-    #[allow(
-        deprecated,
-        reason = "ExperimentalMarker gates an experimental API we opt into"
-    )]
-    fn get_dynamic_completion(
-        &self,
-        plugin: &Self::Plugin,
-        _engine: &EngineInterface,
-        _call: DynamicCompletionCall,
-        arg_type: ArgType,
-        _experimental: nu_protocol::engine::ExperimentalMarker,
-    ) -> Option<Vec<DynamicSuggestion>> {
-        completers::ref_and_output(plugin, arg_type, complete_names)
-    }
+    dynamic_completion!(|plugin, call, arg_type| completers::ref_and_output(
+        plugin,
+        arg_type,
+        complete_names
+    ));
 }
 
 fn all_volumes(plugin: &NudePlugin) -> Option<Vec<Volume>> {
@@ -161,9 +134,9 @@ fn complete_drivers(plugin: &NudePlugin) -> Option<Vec<DynamicSuggestion>> {
 }
 
 async fn run_list(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Result<Value> {
-    let decorators = Decorators::from_call(call)?;
+    let show_labels = call.has_flag("show-labels")?;
     let span = call.head;
-    let fmt = scaffold::output_format(call, false)?;
+    let fmt = scaffold::list_format(call)?;
 
     let filters = scaffold::collect_filters(call, FILTERS)?;
     let opts = ListVolumesOptionsBuilder::default()
@@ -178,8 +151,8 @@ async fn run_list(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Result<V
     let rows = volumes
         .iter()
         .map(|v| match fmt {
-            OutputFormat::Compact => compact(v, span, decorators),
-            OutputFormat::Wide => wide(v, span, decorators),
+            OutputFormat::Compact => compact(v, span, show_labels),
+            OutputFormat::Wide => wide(v, span, show_labels),
             OutputFormat::Full => full_value(v, span),
         })
         .collect();
@@ -188,33 +161,33 @@ async fn run_list(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Result<V
 
 async fn run_inspect(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Result<Value> {
     let name: String = call.req(0)?;
-    let decorators = Decorators::from_call(call)?;
+    let show_labels = call.has_flag("show-labels")?;
     let span = call.head;
-    let fmt = scaffold::output_format(call, true)?;
+    let fmt = scaffold::inspect_format(call)?;
 
     let v = plugin.docker()?.inspect_volume(&name).await?;
     Ok(match fmt {
         OutputFormat::Full => full_value(&v, span),
-        _ => wide(&v, span, decorators),
+        _ => wide(&v, span, show_labels),
     })
 }
 
-fn compact(v: &Volume, span: Span, decorators: Decorators) -> Value {
+fn compact(v: &Volume, span: Span, show_labels: bool) -> Value {
     let mut rec = Record::new();
-    rec.push("name", str_opt(Some(v.name.as_str()), span));
-    rec.push("driver", str_opt(Some(v.driver.as_str()), span));
+    rec.push("name", str_opt(v.name.as_str(), span));
+    rec.push("driver", str_opt(v.driver.as_str(), span));
     rec.push("scope", enum_opt(v.scope.as_ref(), span));
     rec.push("created", opt_rfc3339(v.created_at.as_deref(), span));
-    decorators.apply_labels(&mut rec, Some(&v.labels), span);
+    push_labels(&mut rec, show_labels, Some(&v.labels), span);
     Value::record(rec, span)
 }
 
-fn wide(v: &Volume, span: Span, decorators: Decorators) -> Value {
+fn wide(v: &Volume, span: Span, show_labels: bool) -> Value {
     let mut rec = Record::new();
-    rec.push("name", str_opt(Some(v.name.as_str()), span));
-    rec.push("driver", str_opt(Some(v.driver.as_str()), span));
+    rec.push("name", str_opt(v.name.as_str(), span));
+    rec.push("driver", str_opt(v.driver.as_str(), span));
     rec.push("scope", enum_opt(v.scope.as_ref(), span));
-    rec.push("mountpoint", str_opt(Some(v.mountpoint.as_str()), span));
+    rec.push("mountpoint", str_opt(v.mountpoint.as_str(), span));
     rec.push("created", opt_rfc3339(v.created_at.as_deref(), span));
     rec.push("options", str_map(Some(&v.options), span));
     rec.push(
@@ -225,6 +198,6 @@ fn wide(v: &Volume, span: Span, decorators: Decorators) -> Value {
         "refs",
         opt_int(v.usage_data.as_ref().map(|u| u.ref_count), span),
     );
-    decorators.apply_labels(&mut rec, Some(&v.labels), span);
+    push_labels(&mut rec, show_labels, Some(&v.labels), span);
     Value::record(rec, span)
 }

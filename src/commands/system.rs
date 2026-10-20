@@ -1,25 +1,14 @@
 use bollard::models::{SystemInfo, SystemVersion};
-use nu_plugin::{DynamicCompletionCall, EngineInterface, EvaluatedCall, SimplePluginCommand};
-use nu_protocol::{
-    engine::ArgType, DynamicSuggestion, LabeledError, Record, Signature, Span, Value,
-};
+use nu_plugin::{EngineInterface, EvaluatedCall, SimplePluginCommand};
+use nu_protocol::{LabeledError, Record, Signature, Span, Value};
 
-use crate::completers;
+use crate::completers::{self, dynamic_completion};
 use crate::helpers::{
     enum_opt, full_value, opt_bool, opt_filesize, opt_int, opt_rfc3339, str_list, str_opt,
 };
 use crate::output::OutputFormat;
 use crate::plugin::NudePlugin;
 use crate::scaffold;
-
-fn output_completion(arg_type: ArgType) -> Option<Vec<DynamicSuggestion>> {
-    match arg_type {
-        ArgType::Flag(name) if matches!(name.as_ref(), "output" | "o") => {
-            Some(completers::from_pairs(OutputFormat::ALL))
-        }
-        _ => None,
-    }
-}
 
 pub struct SystemInfoCommand;
 
@@ -50,25 +39,12 @@ impl SimplePluginCommand for SystemInfoCommand {
         plugin.block_on_labeled(run_info(plugin, call))
     }
 
-    #[allow(
-        deprecated,
-        reason = "ExperimentalMarker gates an experimental API we opt into"
-    )]
-    fn get_dynamic_completion(
-        &self,
-        _plugin: &Self::Plugin,
-        _engine: &EngineInterface,
-        _call: DynamicCompletionCall,
-        arg_type: ArgType,
-        _experimental: nu_protocol::engine::ExperimentalMarker,
-    ) -> Option<Vec<DynamicSuggestion>> {
-        output_completion(arg_type)
-    }
+    dynamic_completion!(|plugin, call, arg_type| completers::flags(arg_type, |_| None));
 }
 
 async fn run_info(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Result<Value> {
     let span = call.head;
-    let fmt = scaffold::output_format(call, false)?;
+    let fmt = scaffold::list_format(call)?;
     let info = plugin.docker()?.info().await?;
     Ok(match fmt {
         OutputFormat::Full => full_value(&info, span),
@@ -154,25 +130,12 @@ impl SimplePluginCommand for VersionCommand {
         plugin.block_on_labeled(run_version(plugin, call))
     }
 
-    #[allow(
-        deprecated,
-        reason = "ExperimentalMarker gates an experimental API we opt into"
-    )]
-    fn get_dynamic_completion(
-        &self,
-        _plugin: &Self::Plugin,
-        _engine: &EngineInterface,
-        _call: DynamicCompletionCall,
-        arg_type: ArgType,
-        _experimental: nu_protocol::engine::ExperimentalMarker,
-    ) -> Option<Vec<DynamicSuggestion>> {
-        output_completion(arg_type)
-    }
+    dynamic_completion!(|plugin, call, arg_type| completers::flags(arg_type, |_| None));
 }
 
 async fn run_version(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Result<Value> {
     let span = call.head;
-    let fmt = scaffold::output_format(call, false)?;
+    let fmt = scaffold::list_format(call)?;
     let v = plugin.docker()?.version().await?;
     Ok(match fmt {
         OutputFormat::Full => full_value(&v, span),

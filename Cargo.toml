@@ -12,7 +12,7 @@ path = "src/main.rs"
 nu-plugin = "0.116"
 nu-protocol = "0.116"
 bollard = "0.21"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
 futures = "0.3"
 serde = "1"
 serde_json = "1"

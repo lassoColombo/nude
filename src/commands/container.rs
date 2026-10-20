@@ -1,16 +1,13 @@
 use bollard::models::{ContainerInspectResponse, ContainerSummary};
 use bollard::query_parameters::ListContainersOptionsBuilder;
 use futures::future::join_all;
-use nu_plugin::{DynamicCompletionCall, EngineInterface, EvaluatedCall, SimplePluginCommand};
-use nu_protocol::{
-    engine::ArgType, DynamicSuggestion, LabeledError, Record, Signature, Span, Value,
-};
+use nu_plugin::{EngineInterface, EvaluatedCall, SimplePluginCommand};
+use nu_protocol::{DynamicSuggestion, LabeledError, Record, Signature, Span, Value};
 
-use crate::completers;
-use crate::decorators::Decorators;
+use crate::completers::{self, dynamic_completion};
 use crate::helpers::{
-    clean_name, enum_opt, full_value, opt_bool, opt_epoch, opt_int, opt_rfc3339, short_id,
-    str_list, str_opt,
+    clean_name, enum_opt, full_value, opt_bool, opt_epoch, opt_int, opt_rfc3339, opt_short_id,
+    push_labels, skip_vanished, str_list, str_opt,
 };
 use crate::output::OutputFormat;
 use crate::plugin::NudePlugin;
@@ -82,42 +79,27 @@ impl SimplePluginCommand for ContainerLsCommand {
         plugin.block_on_labeled(run_list(plugin, call))
     }
 
-    #[allow(
-        deprecated,
-        reason = "ExperimentalMarker gates an experimental API we opt into"
-    )]
-    fn get_dynamic_completion(
-        &self,
-        plugin: &Self::Plugin,
-        _engine: &EngineInterface,
-        call: DynamicCompletionCall,
-        arg_type: ArgType,
-        _experimental: nu_protocol::engine::ExperimentalMarker,
-    ) -> Option<Vec<DynamicSuggestion>> {
-        match arg_type {
-            ArgType::Flag(name) => match name.as_ref() {
-                // Closed enums → static lists.
-                "output" | "o" => Some(completers::from_pairs(OutputFormat::ALL)),
-                "status" => Some(completers::from_pairs(STATUS)),
-                "health" => Some(completers::from_pairs(HEALTH)),
-                // Container references → live names/ids.
-                "name" | "before" | "since" => complete_names(plugin),
-                "id" => complete_ids(plugin),
-                // Cross-references → the owning resource's completer.
-                "ancestor" => crate::commands::image::complete_refs(plugin),
-                "network" => crate::commands::network::complete_names(plugin),
-                "volume" => crate::commands::volume::complete_names(plugin),
-                "labels" => completers::complete_labels(
-                    &call,
-                    all_containers(plugin)?
-                        .iter()
-                        .filter_map(|c| c.labels.as_ref()),
-                ),
-                _ => None,
-            },
+    dynamic_completion!(
+        |plugin, call, arg_type| completers::flags(arg_type, |flag| match flag {
+            // Closed enums → static lists.
+            "status" => Some(completers::from_pairs(STATUS)),
+            "health" => Some(completers::from_pairs(HEALTH)),
+            // Container references → live names/ids.
+            "name" | "before" | "since" => complete_names(plugin),
+            "id" => complete_ids(plugin),
+            // Cross-references → the owning resource's completer.
+            "ancestor" => crate::commands::image::complete_refs(plugin),
+            "network" => crate::commands::network::complete_names(plugin),
+            "volume" => crate::commands::volume::complete_names(plugin),
+            "labels" => completers::complete_labels(
+                &call,
+                all_containers(plugin)?
+                    .iter()
+                    .filter_map(|c| c.labels.as_ref()),
+            ),
             _ => None,
-        }
-    }
+        })
+    );
 }
 
 impl SimplePluginCommand for ContainerInspectCommand {
@@ -145,20 +127,11 @@ impl SimplePluginCommand for ContainerInspectCommand {
         plugin.block_on_labeled(run_inspect(plugin, call))
     }
 
-    #[allow(
-        deprecated,
-        reason = "ExperimentalMarker gates an experimental API we opt into"
-    )]
-    fn get_dynamic_completion(
-        &self,
-        plugin: &Self::Plugin,
-        _engine: &EngineInterface,
-        _call: DynamicCompletionCall,
-        arg_type: ArgType,
-        _experimental: nu_protocol::engine::ExperimentalMarker,
-    ) -> Option<Vec<DynamicSuggestion>> {
-        completers::ref_and_output(plugin, arg_type, complete_names)
-    }
+    dynamic_completion!(|plugin, call, arg_type| completers::ref_and_output(
+        plugin,
+        arg_type,
+        complete_names
+    ));
 }
 
 const STATUS: &[(&str, &str)] = &[
@@ -216,9 +189,9 @@ fn complete_ids(plugin: &NudePlugin) -> Option<Vec<DynamicSuggestion>> {
 
 async fn run_list(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Result<Value> {
     let all: bool = call.has_flag("all")?;
-    let decorators = Decorators::from_call(call)?;
+    let show_labels = call.has_flag("show-labels")?;
     let span = call.head;
-    let fmt = scaffold::output_format(call, false)?;
+    let fmt = scaffold::list_format(call)?;
 
     let docker = plugin.docker()?;
     let filters = scaffold::collect_filters(call, FILTERS)?;
@@ -227,44 +200,41 @@ async fn run_list(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Result<V
         .filters(&filters)
         .build();
     let summaries = docker.list_containers(Some(opts)).await?;
-    match fmt {
-        OutputFormat::Compact => Ok(Value::list(
-            summaries
-                .iter()
-                .map(|c| compact(c, span, decorators))
-                .collect(),
-            span,
-        )),
-        _ => {
-            let ids: Vec<String> = summaries.into_iter().filter_map(|c| c.id).collect();
-            let inspected = join_all(ids.iter().map(|id| docker.inspect_container(id, None))).await;
-            let rows: Vec<Value> = inspected
-                .into_iter()
-                .filter_map(Result::ok)
-                .map(|r| match fmt {
-                    OutputFormat::Full => full_value(&r, span),
-                    _ => wide(&r, span, decorators),
-                })
-                .collect();
-            Ok(Value::list(rows, span))
-        }
+    if fmt == OutputFormat::Compact {
+        let rows = summaries
+            .iter()
+            .map(|c| compact(c, span, show_labels))
+            .collect();
+        return Ok(Value::list(rows, span));
     }
+
+    let ids: Vec<String> = summaries.into_iter().filter_map(|c| c.id).collect();
+    let inspected =
+        skip_vanished(join_all(ids.iter().map(|id| docker.inspect_container(id, None))).await)?;
+    let rows = inspected
+        .iter()
+        .map(|r| match fmt {
+            OutputFormat::Full => full_value(r, span),
+            _ => wide(r, span, show_labels),
+        })
+        .collect();
+    Ok(Value::list(rows, span))
 }
 
 async fn run_inspect(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Result<Value> {
     let name: String = call.req(0)?;
-    let decorators = Decorators::from_call(call)?;
+    let show_labels = call.has_flag("show-labels")?;
     let span = call.head;
-    let fmt = scaffold::output_format(call, true)?;
+    let fmt = scaffold::inspect_format(call)?;
 
     let resp = plugin.docker()?.inspect_container(&name, None).await?;
     Ok(match fmt {
         OutputFormat::Full => full_value(&resp, span),
-        _ => wide(&resp, span, decorators),
+        _ => wide(&resp, span, show_labels),
     })
 }
 
-fn compact(c: &ContainerSummary, span: Span, decorators: Decorators) -> Value {
+fn compact(c: &ContainerSummary, span: Span, show_labels: bool) -> Value {
     let status = c.status.as_deref();
     let mut rec = Record::new();
     rec.push(
@@ -276,7 +246,7 @@ fn compact(c: &ContainerSummary, span: Span, decorators: Decorators) -> Value {
     rec.push("health", str_opt(status_health(status), span));
     rec.push("exit_code", opt_int(status_exit_code(status), span));
     rec.push("created", opt_epoch(c.created, span));
-    decorators.apply_labels(&mut rec, c.labels.as_ref(), span);
+    push_labels(&mut rec, show_labels, c.labels.as_ref(), span);
     Value::record(rec, span)
 }
 
@@ -302,7 +272,7 @@ fn status_exit_code(status: Option<&str>) -> Option<i64> {
     digits.parse().ok()
 }
 
-fn wide(r: &ContainerInspectResponse, span: Span, decorators: Decorators) -> Value {
+fn wide(r: &ContainerInspectResponse, span: Span, show_labels: bool) -> Value {
     let config = r.config.as_ref();
     let state = r.state.as_ref();
 
@@ -311,10 +281,7 @@ fn wide(r: &ContainerInspectResponse, span: Span, decorators: Decorators) -> Val
         "name",
         str_opt(r.name.as_deref().map(|n| n.trim_start_matches('/')), span),
     );
-    rec.push(
-        "id",
-        str_opt(r.id.as_deref().map(short_id).as_deref(), span),
-    );
+    rec.push("id", opt_short_id(r.id.as_deref(), span));
     rec.push(
         "image",
         str_opt(config.and_then(|c| c.image.as_deref()), span),
@@ -357,10 +324,16 @@ fn wide(r: &ContainerInspectResponse, span: Span, decorators: Decorators) -> Val
     );
     rec.push("restarts", opt_int(r.restart_count, span));
     rec.push("ports", ports_value(r, span));
-    rec.push("ip", ip_value(r, span));
-    rec.push("networks", networks_value(r, span));
+    let networks = sorted_networks(r);
+    rec.push("ip", ip_value(&networks, span));
+    rec.push("networks", networks_value(&networks, span));
     rec.push("mounts", mounts_value(r, span));
-    decorators.apply_labels(&mut rec, config.and_then(|c| c.labels.as_ref()), span);
+    push_labels(
+        &mut rec,
+        show_labels,
+        config.and_then(|c| c.labels.as_ref()),
+        span,
+    );
     Value::record(rec, span)
 }
 
@@ -371,67 +344,76 @@ fn port_int(s: &str, span: Span) -> Value {
     }
 }
 
+/// One row per (container port, host binding), ordered by port number then protocol so the
+/// table is stable across runs (the daemon hands us a map).
 fn ports_value(r: &ContainerInspectResponse, span: Span) -> Value {
     let Some(ports) = r.network_settings.as_ref().and_then(|ns| ns.ports.as_ref()) else {
         return Value::list(vec![], span);
     };
+    let mut keys: Vec<&String> = ports.keys().collect();
+    keys.sort_by_key(|k| {
+        let (port, proto) = k.split_once('/').unwrap_or((k.as_str(), ""));
+        (port.parse::<u32>().unwrap_or(u32::MAX), proto.to_string())
+    });
+
     let mut rows = Vec::new();
-    for (key, bindings) in ports {
+    for key in keys {
         let (port, proto) = key.split_once('/').unwrap_or((key.as_str(), ""));
-        match bindings {
-            Some(bs) if !bs.is_empty() => {
-                for b in bs {
-                    let mut rec = Record::new();
-                    rec.push("container_port", port_int(port, span));
-                    rec.push("proto", Value::string(proto, span));
-                    rec.push("host_ip", str_opt(b.host_ip.as_deref(), span));
-                    rec.push(
-                        "host_port",
-                        match b.host_port.as_deref() {
-                            Some(p) if !p.is_empty() => port_int(p, span),
-                            _ => Value::nothing(span),
-                        },
-                    );
-                    rows.push(Value::record(rec, span));
-                }
-            }
-            _ => {
-                let mut rec = Record::new();
-                rec.push("container_port", port_int(port, span));
-                rec.push("proto", Value::string(proto, span));
-                rec.push("host_ip", Value::nothing(span));
-                rec.push("host_port", Value::nothing(span));
-                rows.push(Value::record(rec, span));
-            }
+        let row = |host_ip: Option<&str>, host_port: Option<&str>| {
+            let mut rec = Record::new();
+            rec.push("container_port", port_int(port, span));
+            rec.push("proto", Value::string(proto, span));
+            rec.push("host_ip", str_opt(host_ip, span));
+            rec.push(
+                "host_port",
+                match host_port {
+                    Some(p) if !p.is_empty() => port_int(p, span),
+                    _ => Value::nothing(span),
+                },
+            );
+            Value::record(rec, span)
+        };
+        match &ports[key] {
+            Some(bs) if !bs.is_empty() => rows.extend(
+                bs.iter()
+                    .map(|b| row(b.host_ip.as_deref(), b.host_port.as_deref())),
+            ),
+            _ => rows.push(row(None, None)),
         }
     }
     Value::list(rows, span)
 }
 
-fn ip_value(r: &ContainerInspectResponse, span: Span) -> Value {
-    let ip = r
-        .network_settings
-        .as_ref()
-        .and_then(|ns| ns.networks.as_ref())
-        .and_then(|nets| {
-            nets.values()
-                .filter_map(|e| e.ip_address.as_deref())
-                .find(|s| !s.is_empty())
-        });
-    str_opt(ip, span)
-}
-
-fn networks_value(r: &ContainerInspectResponse, span: Span) -> Value {
-    let names = r
+/// `(network name, ip)` pairs in name order: the daemon's map has no stable order, and `ip`
+/// below picks the first, so without sorting a multi-homed container's ip could change per call.
+fn sorted_networks(r: &ContainerInspectResponse) -> Vec<(&str, Option<&str>)> {
+    let mut nets: Vec<(&str, Option<&str>)> = r
         .network_settings
         .as_ref()
         .and_then(|ns| ns.networks.as_ref())
         .map(|nets| {
-            nets.keys()
-                .map(|k| Value::string(k, span))
-                .collect::<Vec<_>>()
+            nets.iter()
+                .map(|(name, e)| (name.as_str(), e.ip_address.as_deref()))
+                .collect()
         })
         .unwrap_or_default();
+    nets.sort_unstable_by_key(|(name, _)| *name);
+    nets
+}
+
+fn ip_value(networks: &[(&str, Option<&str>)], span: Span) -> Value {
+    let ip = networks
+        .iter()
+        .filter_map(|(_, ip)| *ip)
+        .find(|s| !s.is_empty());
+    str_opt(ip, span)
+}
+
+fn networks_value(networks: &[(&str, Option<&str>)], span: Span) -> Value {
+    let names = networks
+        .iter()
+        .map(|(name, _)| Value::string(*name, span))
+        .collect();
     Value::list(names, span)
 }
 
@@ -456,7 +438,9 @@ fn mounts_value(r: &ContainerInspectResponse, span: Span) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{status_exit_code, status_health};
+    use super::*;
+    use bollard::models::{EndpointSettings, NetworkSettings, PortBinding};
+    use std::collections::HashMap;
 
     #[test]
     fn health_is_parsed_from_the_status_line() {
@@ -488,5 +472,72 @@ mod tests {
         assert_eq!(status_exit_code(Some("Up 12 hours (healthy)")), None);
         assert_eq!(status_exit_code(Some("Created")), None);
         assert_eq!(status_exit_code(None), None);
+    }
+
+    fn with_networks(nets: &[(&str, &str)]) -> ContainerInspectResponse {
+        let networks: HashMap<String, EndpointSettings> = nets
+            .iter()
+            .map(|(name, ip)| {
+                (
+                    name.to_string(),
+                    EndpointSettings {
+                        ip_address: Some(ip.to_string()),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        ContainerInspectResponse {
+            network_settings: Some(NetworkSettings {
+                networks: Some(networks),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ip_and_networks_follow_network_name_order() {
+        let span = Span::test_data();
+        let r = with_networks(&[("zeta", "10.0.0.9"), ("alpha", ""), ("beta", "10.0.0.2")]);
+        let nets = sorted_networks(&r);
+        assert_eq!(ip_value(&nets, span).as_str().unwrap(), "10.0.0.2");
+        let names: Vec<String> = networks_value(&nets, span)
+            .into_list()
+            .unwrap()
+            .into_iter()
+            .map(|v| v.into_string().unwrap())
+            .collect();
+        assert_eq!(names, ["alpha", "beta", "zeta"]);
+    }
+
+    #[test]
+    fn ports_are_ordered_numerically_and_unbound_ports_get_one_row() {
+        let span = Span::test_data();
+        let mut ports = HashMap::new();
+        ports.insert(
+            "443/tcp".to_string(),
+            Some(vec![PortBinding {
+                host_ip: Some("0.0.0.0".into()),
+                host_port: Some("8443".into()),
+            }]),
+        );
+        ports.insert("80/tcp".to_string(), None);
+        ports.insert("53/udp".to_string(), Some(vec![]));
+        let r = ContainerInspectResponse {
+            network_settings: Some(NetworkSettings {
+                ports: Some(ports),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let rows = ports_value(&r, span).into_list().unwrap();
+        let col = |i: usize, c: &str| rows[i].as_record().unwrap().get(c).unwrap().clone();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(col(0, "container_port"), Value::int(53, span));
+        assert_eq!(col(1, "container_port"), Value::int(80, span));
+        assert_eq!(col(1, "host_port"), Value::nothing(span));
+        assert_eq!(col(2, "container_port"), Value::int(443, span));
+        assert_eq!(col(2, "host_port"), Value::int(8443, span));
     }
 }

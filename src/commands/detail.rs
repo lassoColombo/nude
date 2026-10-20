@@ -3,13 +3,11 @@ use bollard::models::{
 };
 use bollard::query_parameters::{TopOptions, TopOptionsBuilder};
 use chrono::{DateTime, TimeDelta, Utc};
-use nu_plugin::{DynamicCompletionCall, EngineInterface, EvaluatedCall, SimplePluginCommand};
-use nu_protocol::{
-    engine::ArgType, DynamicSuggestion, LabeledError, Record, Signature, Span, SyntaxShape, Value,
-};
+use nu_plugin::{EngineInterface, EvaluatedCall, SimplePluginCommand};
+use nu_protocol::{LabeledError, Record, Signature, Span, SyntaxShape, Value, engine::ArgType};
 
 use crate::commands::{container, image};
-use crate::completers;
+use crate::completers::{self, dynamic_completion};
 use crate::helpers::{epoch_date, full_value, short_id, str_list, str_opt};
 use crate::output::OutputFormat;
 use crate::plugin::NudePlugin;
@@ -44,26 +42,17 @@ impl SimplePluginCommand for ContainerDiffCommand {
         plugin.block_on_labeled(run_diff(plugin, call))
     }
 
-    #[allow(
-        deprecated,
-        reason = "ExperimentalMarker gates an experimental API we opt into"
-    )]
-    fn get_dynamic_completion(
-        &self,
-        plugin: &Self::Plugin,
-        _engine: &EngineInterface,
-        _call: DynamicCompletionCall,
-        arg_type: ArgType,
-        _experimental: nu_protocol::engine::ExperimentalMarker,
-    ) -> Option<Vec<DynamicSuggestion>> {
-        completers::ref_and_output(plugin, arg_type, container::complete_names)
-    }
+    dynamic_completion!(|plugin, call, arg_type| completers::ref_and_output(
+        plugin,
+        arg_type,
+        container::complete_names
+    ));
 }
 
 async fn run_diff(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Result<Value> {
     let name: String = call.req(0)?;
     let span = call.head;
-    let fmt = scaffold::output_format(call, false)?;
+    let fmt = scaffold::list_format(call)?;
     // `None` = no changes → an empty list, not an error.
     let changes = plugin
         .docker()?
@@ -82,7 +71,7 @@ async fn run_diff(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Result<V
 
 fn diff_row(c: &FilesystemChange, span: Span) -> Value {
     let mut rec = Record::new();
-    rec.push("path", str_opt(Some(c.path.as_str()), span));
+    rec.push("path", str_opt(c.path.as_str(), span));
     rec.push("kind", change_kind(c.kind, span));
     Value::record(rec, span)
 }
@@ -152,7 +141,7 @@ impl Cell {
     fn value(self, raw: &str, now: DateTime<Utc>, span: Span) -> Value {
         let nothing = || Value::nothing(span);
         match self {
-            Self::Str => str_opt(Some(raw), span),
+            Self::Str => str_opt(raw, span),
             Self::Int => raw
                 .parse()
                 .map_or_else(|_| nothing(), |n| Value::int(n, span)),
@@ -183,7 +172,7 @@ impl Cell {
             },
             Self::Tty => match raw {
                 "?" | "-" => nothing(),
-                tty => str_opt(Some(tty), span),
+                tty => str_opt(tty, span),
             },
         }
     }
@@ -219,30 +208,19 @@ impl SimplePluginCommand for ContainerTopCommand {
         plugin.block_on_labeled(run_top(plugin, call))
     }
 
-    #[allow(
-        deprecated,
-        reason = "ExperimentalMarker gates an experimental API we opt into"
-    )]
-    fn get_dynamic_completion(
-        &self,
-        plugin: &Self::Plugin,
-        _engine: &EngineInterface,
-        _call: DynamicCompletionCall,
-        arg_type: ArgType,
-        _experimental: nu_protocol::engine::ExperimentalMarker,
-    ) -> Option<Vec<DynamicSuggestion>> {
+    dynamic_completion!(|plugin, call, arg_type| {
         // Free-form `ps` flags: nothing to suggest, but don't fall back to file completion.
         if matches!(&arg_type, ArgType::Flag(f) if f.as_ref() == "ps-args") {
             return Some(Vec::new());
         }
         completers::ref_and_output(plugin, arg_type, container::complete_names)
-    }
+    });
 }
 
 async fn run_top(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Result<Value> {
     let name: String = call.req(0)?;
     let span = call.head;
-    let fmt = scaffold::output_format(call, false)?;
+    let fmt = scaffold::list_format(call)?;
     let custom: Option<String> = call.get_flag("ps-args")?;
     let docker = plugin.docker()?;
 
@@ -349,26 +327,17 @@ impl SimplePluginCommand for ImageHistoryCommand {
         plugin.block_on_labeled(run_history(plugin, call))
     }
 
-    #[allow(
-        deprecated,
-        reason = "ExperimentalMarker gates an experimental API we opt into"
-    )]
-    fn get_dynamic_completion(
-        &self,
-        plugin: &Self::Plugin,
-        _engine: &EngineInterface,
-        _call: DynamicCompletionCall,
-        arg_type: ArgType,
-        _experimental: nu_protocol::engine::ExperimentalMarker,
-    ) -> Option<Vec<DynamicSuggestion>> {
-        completers::ref_and_output(plugin, arg_type, image::complete_refs)
-    }
+    dynamic_completion!(|plugin, call, arg_type| completers::ref_and_output(
+        plugin,
+        arg_type,
+        image::complete_refs
+    ));
 }
 
 async fn run_history(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Result<Value> {
     let name: String = call.req(0)?;
     let span = call.head;
-    let fmt = scaffold::output_format(call, false)?;
+    let fmt = scaffold::list_format(call)?;
     let history = plugin.docker()?.image_history(&name).await?;
     let rows = history
         .iter()
@@ -385,9 +354,9 @@ fn history_row(h: &ImageHistoryResponseItem, span: Span, wide: bool) -> Value {
     let mut rec = Record::new();
     rec.push("id", history_id(&h.id, span));
     rec.push("created", epoch_date(h.created, span));
-    rec.push("created_by", str_opt(Some(h.created_by.as_str()), span));
+    rec.push("created_by", str_opt(h.created_by.as_str(), span));
     rec.push("size", Value::filesize(h.size, span));
-    rec.push("comment", str_opt(Some(h.comment.as_str()), span));
+    rec.push("comment", str_opt(h.comment.as_str(), span));
     if wide {
         rec.push("tags", str_list(Some(&h.tags), span));
     }
@@ -395,12 +364,10 @@ fn history_row(h: &ImageHistoryResponseItem, span: Span, wide: bool) -> Value {
 }
 
 fn history_id(id: &str, span: Span) -> Value {
-    let id = id.strip_prefix("sha256:").unwrap_or(id);
-    if id.is_empty() || id == "<missing>" {
-        Value::nothing(span)
-    } else {
-        Value::string(short_id(id), span)
+    if id == "<missing>" {
+        return Value::nothing(span);
     }
+    str_opt(short_id(id).as_str(), span)
 }
 
 #[cfg(test)]
@@ -499,11 +466,12 @@ mod tests {
                 "command"
             ]
         );
-        assert!(row
-            .as_record()
-            .unwrap()
-            .values()
-            .all(|v| !matches!(v, Value::List { .. } | Value::Record { .. })));
+        assert!(
+            row.as_record()
+                .unwrap()
+                .values()
+                .all(|v| !matches!(v, Value::List { .. } | Value::Record { .. }))
+        );
     }
 
     #[test]
@@ -518,7 +486,9 @@ mod tests {
         );
         assert_eq!(
             columns(&row),
-            ["user", "pid", "ppid", "cpu", "stime", "tty", "cpu_time", "command"]
+            [
+                "user", "pid", "ppid", "cpu", "stime", "tty", "cpu_time", "command"
+            ]
         );
         let rec = row.as_record().unwrap();
         assert_eq!(

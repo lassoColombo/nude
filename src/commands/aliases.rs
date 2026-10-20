@@ -1,5 +1,5 @@
 use nu_plugin::{DynamicCompletionCall, EngineInterface, EvaluatedCall, SimplePluginCommand};
-use nu_protocol::{engine::ArgType, DynamicSuggestion, LabeledError, Signature, Value};
+use nu_protocol::{DynamicSuggestion, LabeledError, Signature, Value, engine::ArgType};
 
 use crate::commands::container::ContainerLsCommand;
 use crate::commands::detail::{ContainerDiffCommand, ContainerTopCommand, ImageHistoryCommand};

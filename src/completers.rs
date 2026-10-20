@@ -2,13 +2,43 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use nu_plugin::DynamicCompletionCall;
 use nu_protocol::{
+    DynamicSuggestion,
     ast::{Call, Expr, Expression},
     engine::ArgType,
-    DynamicSuggestion,
 };
 
 use crate::output::OutputFormat;
 use crate::plugin::NudePlugin;
+
+/// Expands to a command's `get_dynamic_completion`. The nu-plugin method is experimental (it
+/// takes an `ExperimentalMarker`), so the one place that opts in is here.
+///
+/// ```ignore
+/// dynamic_completion!(|plugin, call, arg_type| completers::flags(arg_type, |flag| match flag {
+///     "status" => Some(completers::from_pairs(STATUS)),
+///     _ => None,
+/// }));
+/// ```
+macro_rules! dynamic_completion {
+    (|$plugin:ident, $call:ident, $arg_type:ident| $body:expr) => {
+        #[allow(
+            deprecated,
+            reason = "ExperimentalMarker gates an experimental API we opt into"
+        )]
+        #[allow(unused_variables)]
+        fn get_dynamic_completion(
+            &self,
+            $plugin: &Self::Plugin,
+            _engine: &nu_plugin::EngineInterface,
+            $call: nu_plugin::DynamicCompletionCall,
+            $arg_type: nu_protocol::engine::ArgType,
+            _experimental: nu_protocol::engine::ExperimentalMarker,
+        ) -> Option<Vec<nu_protocol::DynamicSuggestion>> {
+            $body
+        }
+    };
+}
+pub(crate) use dynamic_completion;
 
 pub fn from_pairs(pairs: &[(&str, &str)]) -> Vec<DynamicSuggestion> {
     pairs
@@ -21,6 +51,21 @@ pub fn from_pairs(pairs: &[(&str, &str)]) -> Vec<DynamicSuggestion> {
         .collect()
 }
 
+/// Flag completion with `--output`/`-o` handled once for everyone; `resource` sees the rest.
+pub fn flags(
+    arg_type: ArgType,
+    resource: impl FnOnce(&str) -> Option<Vec<DynamicSuggestion>>,
+) -> Option<Vec<DynamicSuggestion>> {
+    match arg_type {
+        ArgType::Flag(name) => match name.as_ref() {
+            "output" | "o" => Some(from_pairs(OutputFormat::ALL)),
+            other => resource(other),
+        },
+        _ => None,
+    }
+}
+
+/// The inspect / sub-verb shape: a resource ref in position 0, plus `--output`.
 pub fn ref_and_output(
     plugin: &NudePlugin,
     arg_type: ArgType,
@@ -28,10 +73,7 @@ pub fn ref_and_output(
 ) -> Option<Vec<DynamicSuggestion>> {
     match arg_type {
         ArgType::Positional(0) => name_completer(plugin),
-        ArgType::Flag(name) if matches!(name.as_ref(), "output" | "o") => {
-            Some(from_pairs(OutputFormat::ALL))
-        }
-        _ => None,
+        other => flags(other, |_| None),
     }
 }
 
@@ -180,8 +222,18 @@ mod tests {
 
     #[test]
     fn candidates_never_end_the_token_with_a_space() {
-        assert!(label_filter("app=", &labels())
-            .iter()
-            .all(|s| !s.append_whitespace));
+        assert!(
+            label_filter("app=", &labels())
+                .iter()
+                .all(|s| !s.append_whitespace)
+        );
+    }
+
+    #[test]
+    fn output_flag_is_completed_for_everyone() {
+        let got = flags(ArgType::Flag("o".into()), |_| None).unwrap();
+        assert_eq!(values(&got), ["compact", "wide", "full"]);
+        assert!(flags(ArgType::Flag("other".into()), |_| None).is_none());
+        assert!(flags(ArgType::Positional(0), |_| None).is_none());
     }
 }

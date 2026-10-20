@@ -1,15 +1,13 @@
 use bollard::models::{ImageInspect, ImageSummary};
 use bollard::query_parameters::ListImagesOptionsBuilder;
 use futures::future::join_all;
-use nu_plugin::{DynamicCompletionCall, EngineInterface, EvaluatedCall, SimplePluginCommand};
-use nu_protocol::{
-    engine::ArgType, DynamicSuggestion, LabeledError, Record, Signature, Span, Value,
-};
+use nu_plugin::{EngineInterface, EvaluatedCall, SimplePluginCommand};
+use nu_protocol::{DynamicSuggestion, LabeledError, Record, Signature, Span, Value};
 
-use crate::completers;
-use crate::decorators::Decorators;
+use crate::completers::{self, dynamic_completion};
 use crate::helpers::{
-    epoch_date, full_value, opt_filesize, opt_rfc3339, short_id, str_list, str_opt,
+    epoch_date, full_value, opt_filesize, opt_rfc3339, opt_short_id, push_labels, short_id,
+    skip_vanished, str_list, str_opt,
 };
 use crate::output::OutputFormat;
 use crate::plugin::NudePlugin;
@@ -63,31 +61,14 @@ impl SimplePluginCommand for ImageLsCommand {
         plugin.block_on_labeled(run_list(plugin, call))
     }
 
-    #[allow(
-        deprecated,
-        reason = "ExperimentalMarker gates an experimental API we opt into"
-    )]
-    fn get_dynamic_completion(
-        &self,
-        plugin: &Self::Plugin,
-        _engine: &EngineInterface,
-        call: DynamicCompletionCall,
-        arg_type: ArgType,
-        _experimental: nu_protocol::engine::ExperimentalMarker,
-    ) -> Option<Vec<DynamicSuggestion>> {
-        match arg_type {
-            ArgType::Flag(name) => match name.as_ref() {
-                "output" | "o" => Some(completers::from_pairs(OutputFormat::ALL)),
-                "reference" | "before" | "since" => complete_refs(plugin),
-                "labels" => completers::complete_labels(
-                    &call,
-                    all_images(plugin)?.iter().map(|i| &i.labels),
-                ),
-                _ => None,
-            },
+    dynamic_completion!(
+        |plugin, call, arg_type| completers::flags(arg_type, |flag| match flag {
+            "reference" | "before" | "since" => complete_refs(plugin),
+            "labels" =>
+                completers::complete_labels(&call, all_images(plugin)?.iter().map(|i| &i.labels),),
             _ => None,
-        }
-    }
+        })
+    );
 }
 
 impl SimplePluginCommand for ImageInspectCommand {
@@ -115,20 +96,11 @@ impl SimplePluginCommand for ImageInspectCommand {
         plugin.block_on_labeled(run_inspect(plugin, call))
     }
 
-    #[allow(
-        deprecated,
-        reason = "ExperimentalMarker gates an experimental API we opt into"
-    )]
-    fn get_dynamic_completion(
-        &self,
-        plugin: &Self::Plugin,
-        _engine: &EngineInterface,
-        _call: DynamicCompletionCall,
-        arg_type: ArgType,
-        _experimental: nu_protocol::engine::ExperimentalMarker,
-    ) -> Option<Vec<DynamicSuggestion>> {
-        completers::ref_and_output(plugin, arg_type, complete_refs)
-    }
+    dynamic_completion!(|plugin, call, arg_type| completers::ref_and_output(
+        plugin,
+        arg_type,
+        complete_refs
+    ));
 }
 
 pub(crate) fn complete_refs(plugin: &NudePlugin) -> Option<Vec<DynamicSuggestion>> {
@@ -156,9 +128,9 @@ fn all_images(plugin: &NudePlugin) -> Option<Vec<ImageSummary>> {
 
 async fn run_list(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Result<Value> {
     let all: bool = call.has_flag("all")?;
-    let decorators = Decorators::from_call(call)?;
+    let show_labels = call.has_flag("show-labels")?;
     let span = call.head;
-    let fmt = scaffold::output_format(call, false)?;
+    let fmt = scaffold::list_format(call)?;
 
     let docker = plugin.docker()?;
     let filters = scaffold::collect_filters(call, FILTERS)?;
@@ -167,40 +139,36 @@ async fn run_list(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Result<V
         .filters(&filters)
         .build();
     let summaries = docker.list_images(Some(opts)).await?;
-    match fmt {
-        OutputFormat::Compact => Ok(Value::list(
-            summaries
-                .iter()
-                .flat_map(|i| compact_rows(i, span, decorators))
-                .collect(),
-            span,
-        )),
-        _ => {
-            let ids: Vec<String> = summaries.into_iter().map(|i| i.id).collect();
-            let inspected = join_all(ids.iter().map(|id| docker.inspect_image(id))).await;
-            let rows: Vec<Value> = inspected
-                .into_iter()
-                .filter_map(Result::ok)
-                .map(|r| match fmt {
-                    OutputFormat::Full => full_value(&r, span),
-                    _ => wide(&r, span, decorators),
-                })
-                .collect();
-            Ok(Value::list(rows, span))
-        }
+    if fmt == OutputFormat::Compact {
+        let rows = summaries
+            .iter()
+            .flat_map(|i| compact_rows(i, span, show_labels))
+            .collect();
+        return Ok(Value::list(rows, span));
     }
+
+    let ids: Vec<String> = summaries.into_iter().map(|i| i.id).collect();
+    let inspected = skip_vanished(join_all(ids.iter().map(|id| docker.inspect_image(id))).await)?;
+    let rows = inspected
+        .iter()
+        .map(|r| match fmt {
+            OutputFormat::Full => full_value(r, span),
+            _ => wide(r, span, show_labels),
+        })
+        .collect();
+    Ok(Value::list(rows, span))
 }
 
 async fn run_inspect(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Result<Value> {
     let name: String = call.req(0)?;
-    let decorators = Decorators::from_call(call)?;
+    let show_labels = call.has_flag("show-labels")?;
     let span = call.head;
-    let fmt = scaffold::output_format(call, true)?;
+    let fmt = scaffold::inspect_format(call)?;
 
     let resp = plugin.docker()?.inspect_image(&name).await?;
     Ok(match fmt {
         OutputFormat::Full => full_value(&resp, span),
-        _ => wide(&resp, span, decorators),
+        _ => wide(&resp, span, show_labels),
     })
 }
 
@@ -213,38 +181,33 @@ fn clean(part: &str) -> Option<&str> {
     (!part.is_empty() && part != "<none>").then_some(part)
 }
 
-fn short_image_id(id: &str) -> String {
-    short_id(id.strip_prefix("sha256:").unwrap_or(id))
-}
-
-fn compact_rows(img: &ImageSummary, span: Span, decorators: Decorators) -> Vec<Value> {
+fn compact_rows(img: &ImageSummary, span: Span, show_labels: bool) -> Vec<Value> {
     let refs: Vec<&str> = if img.repo_tags.is_empty() {
         vec!["<none>:<none>"]
     } else {
         img.repo_tags.iter().map(String::as_str).collect()
     };
-    let id = short_image_id(&img.id);
+    let id = short_id(&img.id);
     refs.iter()
         .map(|r| {
             let (repository, tag) = split_ref(r);
             let mut rec = Record::new();
             rec.push("repository", str_opt(repository, span));
             rec.push("tag", str_opt(tag, span));
-            rec.push("id", str_opt(Some(id.as_str()), span));
+            rec.push("id", str_opt(id.as_str(), span));
             rec.push("created", epoch_date(img.created, span));
             rec.push("size", Value::filesize(img.size, span));
-            decorators.apply_labels(&mut rec, Some(&img.labels), span);
+            push_labels(&mut rec, show_labels, Some(&img.labels), span);
             Value::record(rec, span)
         })
         .collect()
 }
 
-fn wide(img: &ImageInspect, span: Span, decorators: Decorators) -> Value {
+fn wide(img: &ImageInspect, span: Span, show_labels: bool) -> Value {
     let config = img.config.as_ref();
-    let id = img.id.as_deref().map(short_image_id);
 
     let mut rec = Record::new();
-    rec.push("id", str_opt(id.as_deref(), span));
+    rec.push("id", opt_short_id(img.id.as_deref(), span));
     rec.push("repo_tags", str_list(img.repo_tags.as_ref(), span));
     rec.push("repo_digests", str_list(img.repo_digests.as_ref(), span));
     rec.push("size", opt_filesize(img.size, span));
@@ -273,7 +236,12 @@ fn wide(img: &ImageInspect, span: Span, decorators: Decorators) -> Value {
         "layers",
         str_list(img.root_fs.as_ref().and_then(|r| r.layers.as_ref()), span),
     );
-    decorators.apply_labels(&mut rec, config.and_then(|c| c.labels.as_ref()), span);
+    push_labels(
+        &mut rec,
+        show_labels,
+        config.and_then(|c| c.labels.as_ref()),
+        span,
+    );
     Value::record(rec, span)
 }
 

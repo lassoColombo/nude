@@ -15,14 +15,14 @@ impl OutputFormat {
 }
 
 impl std::str::FromStr for OutputFormat {
-    type Err = ();
+    type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "compact" => Ok(Self::Compact),
             "wide" => Ok(Self::Wide),
             "full" => Ok(Self::Full),
-            _ => Err(()),
+            _ => anyhow::bail!("unknown output format `{s}`: expected compact, wide or full"),
         }
     }
 }

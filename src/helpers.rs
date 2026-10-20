@@ -1,6 +1,6 @@
 use chrono::{TimeZone, Utc};
 use nu_protocol::{IntoValue, Record, Span, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 pub fn epoch_date(secs: i64, span: Span) -> Value {
     match Utc.timestamp_opt(secs, 0) {
@@ -30,8 +30,9 @@ pub fn opt_rfc3339(s: Option<&str>, span: Span) -> Value {
     }
 }
 
-pub fn str_opt(s: Option<&str>, span: Span) -> Value {
-    match s {
+/// A string cell; empty or absent → `nothing`. Takes `&str` or `Option<&str>`.
+pub fn str_opt<'a>(s: impl Into<Option<&'a str>>, span: Span) -> Value {
+    match s.into() {
         Some(s) if !s.is_empty() => Value::string(s, span),
         _ => Value::nothing(span),
     }
@@ -65,10 +66,11 @@ pub fn enum_opt<T: serde::Serialize>(v: Option<&T>, span: Span) -> Value {
     }
 }
 
+/// A string map as a record with keys in sorted order, so column order is stable across runs.
 pub fn str_map(map: Option<&HashMap<String, String>>, span: Span) -> Value {
     let mut rec = Record::new();
     if let Some(map) = map {
-        for (k, v) in map {
+        for (k, v) in map.iter().collect::<BTreeMap<_, _>>() {
             rec.push(k.clone(), Value::string(v.clone(), span));
         }
     }
@@ -80,6 +82,18 @@ pub fn str_list(items: Option<&Vec<String>>, span: Span) -> Value {
         .map(|v| v.iter().map(|s| Value::string(s, span)).collect())
         .unwrap_or_default();
     Value::list(rows, span)
+}
+
+/// Appends the `labels` column when `--show-labels` was given.
+pub fn push_labels(
+    rec: &mut Record,
+    show: bool,
+    labels: Option<&HashMap<String, String>>,
+    span: Span,
+) {
+    if show {
+        rec.push("labels", str_map(labels, span));
+    }
 }
 
 pub fn clean_name(names: Option<&Vec<String>>) -> Option<String> {
@@ -95,8 +109,17 @@ pub fn full_value<T: serde::Serialize>(value: &T, span: Span) -> Value {
     }
 }
 
+/// Docker's short id: the first 12 hex chars, without any `sha256:` prefix.
 pub fn short_id(id: &str) -> String {
-    id.chars().take(12).collect()
+    id.strip_prefix("sha256:")
+        .unwrap_or(id)
+        .chars()
+        .take(12)
+        .collect()
+}
+
+pub fn opt_short_id(id: Option<&str>, span: Span) -> Value {
+    str_opt(id.map(short_id).as_deref(), span)
 }
 
 pub fn split_csv(s: &str) -> Vec<String> {
@@ -105,4 +128,32 @@ pub fn split_csv(s: &str) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+/// Collects a fanned-out inspect. An object that vanished between `list` and `inspect` (404) is
+/// dropped like `docker` does; any other failure is a real error and surfaces.
+pub fn skip_vanished<T>(results: Vec<Result<T, bollard::errors::Error>>) -> anyhow::Result<Vec<T>> {
+    let mut out = Vec::with_capacity(results.len());
+    for r in results {
+        match r {
+            Ok(v) => out.push(v),
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 404, ..
+            }) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::short_id;
+
+    #[test]
+    fn short_id_drops_the_digest_prefix_and_truncates() {
+        assert_eq!(short_id("sha256:abcdef0123456789abcdef"), "abcdef012345");
+        assert_eq!(short_id("abcdef0123456789abcdef"), "abcdef012345");
+        assert_eq!(short_id("abc"), "abc");
+    }
 }

@@ -1,11 +1,9 @@
 use bollard::models::ImageSearchResponseItem;
 use bollard::query_parameters::SearchImagesOptionsBuilder;
-use nu_plugin::{DynamicCompletionCall, EngineInterface, EvaluatedCall, SimplePluginCommand};
-use nu_protocol::{
-    engine::ArgType, DynamicSuggestion, LabeledError, Record, Signature, Span, Value,
-};
+use nu_plugin::{EngineInterface, EvaluatedCall, SimplePluginCommand};
+use nu_protocol::{LabeledError, Record, Signature, Span, Value};
 
-use crate::completers;
+use crate::completers::{self, dynamic_completion};
 use crate::helpers::{full_value, opt_bool, opt_int, str_opt};
 use crate::output::OutputFormat;
 use crate::plugin::NudePlugin;
@@ -54,37 +52,22 @@ impl SimplePluginCommand for SearchCommand {
         plugin.block_on_labeled(run(plugin, call))
     }
 
-    #[allow(
-        deprecated,
-        reason = "ExperimentalMarker gates an experimental API we opt into"
-    )]
-    fn get_dynamic_completion(
-        &self,
-        _plugin: &Self::Plugin,
-        _engine: &EngineInterface,
-        _call: DynamicCompletionCall,
-        arg_type: ArgType,
-        _experimental: nu_protocol::engine::ExperimentalMarker,
-    ) -> Option<Vec<DynamicSuggestion>> {
-        match arg_type {
-            ArgType::Flag(name) if matches!(name.as_ref(), "output" | "o") => {
-                Some(completers::from_pairs(OutputFormat::ALL))
-            }
-            _ => None,
-        }
-    }
+    dynamic_completion!(|plugin, call, arg_type| completers::flags(arg_type, |_| None));
 }
 
 async fn run(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Result<Value> {
     let term: String = call.req(0)?;
     let span = call.head;
-    let fmt = scaffold::output_format(call, false)?;
+    let fmt = scaffold::list_format(call)?;
     let filters = scaffold::collect_filters(call, FILTERS)?;
 
     let mut builder = SearchImagesOptionsBuilder::new()
         .term(&term)
         .filters(&filters);
     if let Some(limit) = call.get_flag::<i64>("limit")? {
+        if !(1..=100).contains(&limit) {
+            anyhow::bail!("--limit must be between 1 and 100 (Docker Hub's cap), got {limit}");
+        }
         builder = builder.limit(limit as i32);
     }
     let results = plugin.docker()?.search_images(builder.build()).await?;

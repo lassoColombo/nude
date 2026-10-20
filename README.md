@@ -7,51 +7,51 @@
 
 ---
 
-- [Why?](#why?)
-- [So what?](#so-what?)
+- [Why?](#why)
+- [So what?](#so-what)
 - [How nude works](#how-nude-works)
 - [Installation](#installation)
 - [Interface](#interface)
   - [Output modes](#output-modes)
-  - [Filtering & completion](#filtering-&-completion)
+  - [Filtering & completion](#filtering--completion)
   - [Dropped flags](#dropped-flags)
 - [Commands](#commands)
-  - [`nude container diff`](#`nude-container-diff`)
-  - [`nude container inspect`](#`nude-container-inspect`)
-  - [`nude container ls`](#`nude-container-ls`)
-  - [`nude container top`](#`nude-container-top`)
-  - [`nude diff`](#`nude-diff`)
-  - [`nude history`](#`nude-history`)
-  - [`nude image history`](#`nude-image-history`)
-  - [`nude image inspect`](#`nude-image-inspect`)
-  - [`nude image ls`](#`nude-image-ls`)
-  - [`nude images`](#`nude-images`)
-  - [`nude info`](#`nude-info`)
-  - [`nude network inspect`](#`nude-network-inspect`)
-  - [`nude network ls`](#`nude-network-ls`)
-  - [`nude plugin inspect`](#`nude-plugin-inspect`)
-  - [`nude plugin ls`](#`nude-plugin-ls`)
-  - [`nude ps`](#`nude-ps`)
-  - [`nude search`](#`nude-search`)
-  - [`nude system info`](#`nude-system-info`)
-  - [`nude top`](#`nude-top`)
-  - [`nude version`](#`nude-version`)
-  - [`nude volume inspect`](#`nude-volume-inspect`)
-  - [`nude volume ls`](#`nude-volume-ls`)
+  - [`nude container diff`](#nude-container-diff)
+  - [`nude container inspect`](#nude-container-inspect)
+  - [`nude container ls`](#nude-container-ls)
+  - [`nude container top`](#nude-container-top)
+  - [`nude diff`](#nude-diff)
+  - [`nude history`](#nude-history)
+  - [`nude image history`](#nude-image-history)
+  - [`nude image inspect`](#nude-image-inspect)
+  - [`nude image ls`](#nude-image-ls)
+  - [`nude images`](#nude-images)
+  - [`nude info`](#nude-info)
+  - [`nude network inspect`](#nude-network-inspect)
+  - [`nude network ls`](#nude-network-ls)
+  - [`nude plugin inspect`](#nude-plugin-inspect)
+  - [`nude plugin ls`](#nude-plugin-ls)
+  - [`nude ps`](#nude-ps)
+  - [`nude search`](#nude-search)
+  - [`nude system info`](#nude-system-info)
+  - [`nude top`](#nude-top)
+  - [`nude version`](#nude-version)
+  - [`nude volume inspect`](#nude-volume-inspect)
+  - [`nude volume ls`](#nude-volume-ls)
 - [Recipes](#recipes)
-    - [Who owns which host port?](#who-owns-which-host-port?)
-    - [Trace a mystery process back to its container.](#trace-a-mystery-process-back-to-its-container.)
-    - [Audit write access to the host.](#audit-write-access-to-the-host.)
-    - [Find containers running stale images.](#find-containers-running-stale-images.)
-    - [Where does image disk actually go?](#where-does-image-disk-actually-go?)
-    - [Map your compose networks.](#map-your-compose-networks.)
+    - [Who owns which host port?](#who-owns-which-host-port)
+    - [Trace a mystery process back to its container.](#trace-a-mystery-process-back-to-its-container)
+    - [Audit write access to the host.](#audit-write-access-to-the-host)
+    - [Find containers running stale images.](#find-containers-running-stale-images)
+    - [Where does image disk actually go?](#where-does-image-disk-actually-go)
+    - [Map your compose networks.](#map-your-compose-networks)
 
 ---
 
 
 ## Why?
 
-Inspecting data from the docker cli looks to much like this:
+Inspecting data from the docker cli looks too much like this:
 ```bash
 
 docker top web | awk 'NR>1 { print $2, $8 }'    # Get each process's PID and command from a container
@@ -69,7 +69,7 @@ nude history postgres:16
 ```
 
 - **Nude does not reimplement all of docker.** It covers the introspection commands that benefit the most from structured data.
-- **Nude tries to mimick the docker syntax to recreate a familiar environment**. No need to learn a new tool.
+- **Nude tries to mimic the docker syntax to recreate a familiar environment**. No need to learn a new tool.
 - **Nude uses your docker configuration**. No additional setup is required.
 - **Nude tries to adhere to docker semantics**, integrating it with richer data.
 
@@ -142,7 +142,7 @@ nude image ls --labels app=web,tier=db
 
 ### Dropped flags
 
-Docker's CLI exposes a whole class of flags exists to reshape the returned text: `--format`, `-q`, `--no-trunc`, `-n`, `--last`, `--digests`.
+Docker's CLI exposes a whole class of flags that exist only to reshape the returned text: `--format`, `-q`, `--no-trunc`, `-n`, `--last`, `--digests`.
 
 nude hands back **typed, structured values**, and shaping the result in nushell is handy enough:
 ```nu
@@ -503,7 +503,7 @@ Search Docker Hub for images
 | Flag             | Type     | Description                                                    |
 | ---------------- | -------- | -------------------------------------------------------------- |
 | `--output`, `-o` | `string` | Output format: compact \| wide \| full (default: compact)      |
-| `--limit`        | `int`    | Maximum number of results (Docker Hub caps at 100; default 25) |
+| `--limit`        | `int`    | Maximum number of results, 1..=100 (default 25)                |
 | `--stars`        | `int`    | Only images with at least this many stars                      |
 | `--official`     | `switch` | Only official images (disabled-only: `\| where not official`)  |
 

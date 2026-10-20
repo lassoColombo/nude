@@ -1,12 +1,10 @@
 use bollard::models::Plugin;
 use bollard::query_parameters::ListPluginsOptionsBuilder;
-use nu_plugin::{DynamicCompletionCall, EngineInterface, EvaluatedCall, SimplePluginCommand};
-use nu_protocol::{
-    engine::ArgType, DynamicSuggestion, LabeledError, Record, Signature, Span, Value,
-};
+use nu_plugin::{EngineInterface, EvaluatedCall, SimplePluginCommand};
+use nu_protocol::{DynamicSuggestion, LabeledError, Record, Signature, Span, Value};
 
-use crate::completers;
-use crate::helpers::{full_value, short_id, str_list, str_opt};
+use crate::completers::{self, dynamic_completion};
+use crate::helpers::{full_value, opt_short_id, str_list, str_opt};
 use crate::output::OutputFormat;
 use crate::plugin::NudePlugin;
 use crate::scaffold::{self, CommandSpec, FilterArg};
@@ -56,27 +54,12 @@ impl SimplePluginCommand for PluginLsCommand {
         plugin.block_on_labeled(run_list(plugin, call))
     }
 
-    #[allow(
-        deprecated,
-        reason = "ExperimentalMarker gates an experimental API we opt into"
-    )]
-    fn get_dynamic_completion(
-        &self,
-        _plugin: &Self::Plugin,
-        _engine: &EngineInterface,
-        _call: DynamicCompletionCall,
-        arg_type: ArgType,
-        _experimental: nu_protocol::engine::ExperimentalMarker,
-    ) -> Option<Vec<DynamicSuggestion>> {
-        match arg_type {
-            ArgType::Flag(name) => match name.as_ref() {
-                "output" | "o" => Some(completers::from_pairs(OutputFormat::ALL)),
-                "capability" => Some(completers::from_pairs(CAPABILITIES)),
-                _ => None,
-            },
+    dynamic_completion!(
+        |plugin, call, arg_type| completers::flags(arg_type, |flag| match flag {
+            "capability" => Some(completers::from_pairs(CAPABILITIES)),
             _ => None,
-        }
-    }
+        })
+    );
 }
 
 impl SimplePluginCommand for PluginInspectCommand {
@@ -104,20 +87,11 @@ impl SimplePluginCommand for PluginInspectCommand {
         plugin.block_on_labeled(run_inspect(plugin, call))
     }
 
-    #[allow(
-        deprecated,
-        reason = "ExperimentalMarker gates an experimental API we opt into"
-    )]
-    fn get_dynamic_completion(
-        &self,
-        plugin: &Self::Plugin,
-        _engine: &EngineInterface,
-        _call: DynamicCompletionCall,
-        arg_type: ArgType,
-        _experimental: nu_protocol::engine::ExperimentalMarker,
-    ) -> Option<Vec<DynamicSuggestion>> {
-        completers::ref_and_output(plugin, arg_type, complete_names)
-    }
+    dynamic_completion!(|plugin, call, arg_type| completers::ref_and_output(
+        plugin,
+        arg_type,
+        complete_names
+    ));
 }
 
 const CAPABILITIES: &[(&str, &str)] = &[
@@ -150,7 +124,7 @@ fn complete_names(plugin: &NudePlugin) -> Option<Vec<DynamicSuggestion>> {
 
 async fn run_list(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Result<Value> {
     let span = call.head;
-    let fmt = scaffold::output_format(call, false)?;
+    let fmt = scaffold::list_format(call)?;
 
     let filters = scaffold::collect_filters(call, FILTERS)?;
     let opts = ListPluginsOptionsBuilder::new().filters(&filters).build();
@@ -169,7 +143,7 @@ async fn run_list(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Result<V
 async fn run_inspect(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Result<Value> {
     let name: String = call.req(0)?;
     let span = call.head;
-    let fmt = scaffold::output_format(call, true)?;
+    let fmt = scaffold::inspect_format(call)?;
 
     let p = plugin.docker()?.inspect_plugin(&name).await?;
     Ok(match fmt {
@@ -180,39 +154,27 @@ async fn run_inspect(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Resul
 
 fn compact(p: &Plugin, span: Span) -> Value {
     let mut rec = Record::new();
-    rec.push("name", str_opt(Some(p.name.as_str()), span));
-    rec.push(
-        "id",
-        str_opt(p.id.as_deref().map(short_id).as_deref(), span),
-    );
+    rec.push("name", str_opt(p.name.as_str(), span));
+    rec.push("id", opt_short_id(p.id.as_deref(), span));
     rec.push("enabled", Value::bool(p.enabled, span));
     rec.push("reference", str_opt(p.plugin_reference.as_deref(), span));
-    rec.push(
-        "description",
-        str_opt(Some(p.config.description.as_str()), span),
-    );
+    rec.push("description", str_opt(p.config.description.as_str(), span));
     Value::record(rec, span)
 }
 
 fn wide(p: &Plugin, span: Span) -> Value {
     let c = &p.config;
     let mut rec = Record::new();
-    rec.push("name", str_opt(Some(p.name.as_str()), span));
-    rec.push(
-        "id",
-        str_opt(p.id.as_deref().map(short_id).as_deref(), span),
-    );
+    rec.push("name", str_opt(p.name.as_str(), span));
+    rec.push("id", opt_short_id(p.id.as_deref(), span));
     rec.push("enabled", Value::bool(p.enabled, span));
     rec.push("reference", str_opt(p.plugin_reference.as_deref(), span));
-    rec.push("description", str_opt(Some(c.description.as_str()), span));
-    rec.push(
-        "documentation",
-        str_opt(Some(c.documentation.as_str()), span),
-    );
+    rec.push("description", str_opt(c.description.as_str(), span));
+    rec.push("documentation", str_opt(c.documentation.as_str(), span));
     rec.push("capabilities", str_list(Some(&c.interface.types), span));
-    rec.push("socket", str_opt(Some(c.interface.socket.as_str()), span));
+    rec.push("socket", str_opt(c.interface.socket.as_str(), span));
     rec.push("entrypoint", str_list(Some(&c.entrypoint), span));
-    rec.push("work_dir", str_opt(Some(c.work_dir.as_str()), span));
+    rec.push("work_dir", str_opt(c.work_dir.as_str(), span));
     rec.push("env", str_list(Some(&p.settings.env), span));
     rec.push("args", str_list(Some(&p.settings.args), span));
     Value::record(rec, span)
