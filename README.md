@@ -147,8 +147,9 @@ Docker's CLI exposes a whole class of flags that exist only to reshape the retur
 nude hands back **typed, structured values**, and shaping the result in nushell is handy enough:
 ```nu
 nude images | get id                              # docker images -q
+nude ps | get id                                  # docker ps -q
 nude ps | get name                                # docker ps --format '{{.Names}}'
-nude ps -a | sort-by created -r| first 3  # docker ps -n 3
+nude ps -a | sort-by created -r | first 3         # docker ps -n 3
 nude images -o wide | get repo_digests | flatten  # docker images --digests
 ```
 

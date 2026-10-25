@@ -1,13 +1,12 @@
-use bollard::models::{ContainerInspectResponse, ContainerSummary};
+use bollard::models::{ContainerInspectResponse, ContainerStateStatusEnum, ContainerSummary};
 use bollard::query_parameters::ListContainersOptionsBuilder;
-use futures::future::join_all;
 use nu_plugin::{EngineInterface, EvaluatedCall, SimplePluginCommand};
 use nu_protocol::{DynamicSuggestion, LabeledError, Record, Signature, Span, Value};
 
 use crate::completers::{self, dynamic_completion};
 use crate::helpers::{
-    clean_name, enum_opt, full_value, opt_bool, opt_epoch, opt_int, opt_rfc3339, opt_short_id,
-    push_labels, skip_vanished, str_list, str_opt,
+    clean_name, enum_opt, full_value, inspect_each, opt_bool, opt_epoch, opt_int, opt_rfc3339,
+    opt_short_id, push_labels, str_list, str_opt,
 };
 use crate::output::OutputFormat;
 use crate::plugin::NudePlugin;
@@ -209,8 +208,7 @@ async fn run_list(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Result<V
     }
 
     let ids: Vec<String> = summaries.into_iter().filter_map(|c| c.id).collect();
-    let inspected =
-        skip_vanished(join_all(ids.iter().map(|id| docker.inspect_container(id, None))).await)?;
+    let inspected = inspect_each(ids.iter().map(|id| docker.inspect_container(id, None))).await?;
     let rows = inspected
         .iter()
         .map(|r| match fmt {
@@ -241,6 +239,7 @@ fn compact(c: &ContainerSummary, span: Span, show_labels: bool) -> Value {
         "name",
         str_opt(clean_name(c.names.as_ref()).as_deref(), span),
     );
+    rec.push("id", opt_short_id(c.id.as_deref(), span));
     rec.push("image", str_opt(c.image.as_deref(), span));
     rec.push("state", enum_opt(c.state.as_ref(), span));
     rec.push("health", str_opt(status_health(status), span));
@@ -299,13 +298,20 @@ fn wide(r: &ContainerInspectResponse, span: Span, show_labels: bool) -> Value {
             span,
         ),
     );
-    let running = state.and_then(|s| s.running).unwrap_or(false);
+    // Only states that carry an exit code report one; a `created` container has never run,
+    // even though the daemon's State.ExitCode reads 0 (matches `docker ps` and `compact`).
+    let has_code = matches!(
+        state.and_then(|s| s.status),
+        Some(
+            ContainerStateStatusEnum::EXITED
+                | ContainerStateStatusEnum::DEAD
+                | ContainerStateStatusEnum::RESTARTING
+        )
+    );
     rec.push(
         "exit_code",
         opt_int(
-            (!running)
-                .then(|| state.and_then(|s| s.exit_code))
-                .flatten(),
+            has_code.then(|| state.and_then(|s| s.exit_code)).flatten(),
             span,
         ),
     );
@@ -417,12 +423,16 @@ fn networks_value(networks: &[(&str, Option<&str>)], span: Span) -> Value {
     Value::list(names, span)
 }
 
+/// Mounts in destination order: the daemon builds the array from a map, so its order varies
+/// between calls.
 fn mounts_value(r: &ContainerInspectResponse, span: Span) -> Value {
     let Some(mounts) = r.mounts.as_ref() else {
         return Value::list(vec![], span);
     };
+    let mut mounts: Vec<_> = mounts.iter().collect();
+    mounts.sort_by(|a, b| a.destination.cmp(&b.destination));
     let rows = mounts
-        .iter()
+        .into_iter()
         .map(|m| {
             let mut rec = Record::new();
             rec.push("type", enum_opt(m.typ.as_ref(), span));

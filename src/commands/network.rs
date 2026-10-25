@@ -1,12 +1,11 @@
 use bollard::models::{Network, NetworkInspect};
 use bollard::query_parameters::ListNetworksOptionsBuilder;
-use futures::future::join_all;
 use nu_plugin::{EngineInterface, EvaluatedCall, SimplePluginCommand};
 use nu_protocol::{DynamicSuggestion, LabeledError, Record, Signature, Span, Value};
 
 use crate::completers::{self, dynamic_completion};
 use crate::helpers::{
-    full_value, opt_bool, opt_rfc3339, opt_short_id, push_labels, skip_vanished, str_map, str_opt,
+    full_value, inspect_each, opt_bool, opt_rfc3339, opt_short_id, push_labels, str_map, str_opt,
 };
 use crate::output::OutputFormat;
 use crate::plugin::NudePlugin;
@@ -191,8 +190,7 @@ async fn run_list(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Result<V
     }
 
     let ids: Vec<String> = networks.into_iter().filter_map(|n| n.id).collect();
-    let inspected =
-        skip_vanished(join_all(ids.iter().map(|id| docker.inspect_network(id, None))).await)?;
+    let inspected = inspect_each(ids.iter().map(|id| docker.inspect_network(id, None))).await?;
     let rows = inspected
         .iter()
         .map(|r| match fmt {

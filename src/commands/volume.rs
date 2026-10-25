@@ -6,9 +6,7 @@ use nu_plugin::{EngineInterface, EvaluatedCall, SimplePluginCommand};
 use nu_protocol::{DynamicSuggestion, LabeledError, Record, Signature, Span, Value};
 
 use crate::completers::{self, dynamic_completion};
-use crate::helpers::{
-    enum_opt, full_value, opt_filesize, opt_int, opt_rfc3339, push_labels, str_map, str_opt,
-};
+use crate::helpers::{enum_opt, full_value, opt_rfc3339, push_labels, str_map, str_opt};
 use crate::output::OutputFormat;
 use crate::plugin::NudePlugin;
 use crate::scaffold::{self, CommandSpec, FilterArg};
@@ -190,14 +188,6 @@ fn wide(v: &Volume, span: Span, show_labels: bool) -> Value {
     rec.push("mountpoint", str_opt(v.mountpoint.as_str(), span));
     rec.push("created", opt_rfc3339(v.created_at.as_deref(), span));
     rec.push("options", str_map(Some(&v.options), span));
-    rec.push(
-        "size",
-        opt_filesize(v.usage_data.as_ref().map(|u| u.size), span),
-    );
-    rec.push(
-        "refs",
-        opt_int(v.usage_data.as_ref().map(|u| u.ref_count), span),
-    );
     push_labels(&mut rec, show_labels, Some(&v.labels), span);
     Value::record(rec, span)
 }

@@ -81,9 +81,9 @@ done:
     compact_notes: >
       compact: name, driver, scope(VolumeScopeEnum → enum_opt; EMPTY→nothing),
       created(created_at: BollardDate = RFC3339 String → opt_rfc3339). wide adds
-      mountpoint, options record, and usage size(→opt_filesize)/refs(→opt_int) -
-      usage is null unless the daemon computed it (docker system df), reported as
-      nothing not 0. `status`/`cluster_volume` are opaque → full only.
+      mountpoint and options record. UsageData (size/ref_count) is NOT projected:
+      list/inspect never fill it (only `system df` does), so the columns were always
+      nothing - revisit with df. `status`/`cluster_volume` are opaque → full only.
 
 # === system: singleton daemon introspection - a DIFFERENT shape ===============
 # NOT list+inspect: no name positional, no filters, no inspect fan-out, no

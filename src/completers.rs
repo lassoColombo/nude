@@ -127,24 +127,17 @@ pub fn label_filter(
     }
 }
 
-pub fn label_filter_from<'a>(
-    typed: &str,
+pub fn complete_labels<'a>(
+    call: &DynamicCompletionCall,
     maps: impl IntoIterator<Item = &'a HashMap<String, String>>,
-) -> Vec<DynamicSuggestion> {
+) -> Option<Vec<DynamicSuggestion>> {
     let mut labels: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for map in maps {
         for (k, v) in map {
             labels.entry(k.clone()).or_default().insert(v.clone());
         }
     }
-    label_filter(typed, &labels)
-}
-
-pub fn complete_labels<'a>(
-    call: &DynamicCompletionCall,
-    maps: impl IntoIterator<Item = &'a HashMap<String, String>>,
-) -> Option<Vec<DynamicSuggestion>> {
-    Some(label_filter_from(flag_prefix(call, "labels"), maps))
+    Some(label_filter(flag_prefix(call, "labels"), &labels))
 }
 
 fn pair(value: String) -> DynamicSuggestion {

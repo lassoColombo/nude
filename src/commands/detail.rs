@@ -233,9 +233,16 @@ async fn run_top(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Result<Va
     };
 
     let mut top = docker.top_processes(&name, ps_options(args)).await;
-    if top.is_err() && custom.is_none() && args.is_some() {
-        // A host `ps` without procps' `-o` support (busybox, …) rejects our format; fall back to
-        // docker's default columns, typed as far as they allow.
+    let ps_failed = matches!(
+        &top,
+        Err(bollard::errors::Error::DockerResponseServerError {
+            status_code: 500,
+            ..
+        })
+    );
+    if ps_failed && custom.is_none() && args.is_some() {
+        // A host `ps` without procps' `-o` support (busybox, …) rejects our format (a 500); fall
+        // back to docker's default columns, typed as far as they allow. 404/409 are not retried.
         top = docker.top_processes(&name, None).await;
     }
     let top = top?;

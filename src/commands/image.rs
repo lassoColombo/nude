@@ -1,13 +1,12 @@
 use bollard::models::{ImageInspect, ImageSummary};
 use bollard::query_parameters::ListImagesOptionsBuilder;
-use futures::future::join_all;
 use nu_plugin::{EngineInterface, EvaluatedCall, SimplePluginCommand};
 use nu_protocol::{DynamicSuggestion, LabeledError, Record, Signature, Span, Value};
 
 use crate::completers::{self, dynamic_completion};
 use crate::helpers::{
-    epoch_date, full_value, opt_filesize, opt_rfc3339, opt_short_id, push_labels, short_id,
-    skip_vanished, str_list, str_opt,
+    epoch_date, full_value, inspect_each, opt_filesize, opt_rfc3339, opt_short_id, push_labels,
+    short_id, str_list, str_opt,
 };
 use crate::output::OutputFormat;
 use crate::plugin::NudePlugin;
@@ -103,12 +102,15 @@ impl SimplePluginCommand for ImageInspectCommand {
     ));
 }
 
-pub(crate) fn complete_refs(plugin: &NudePlugin) -> Option<Vec<DynamicSuggestion>> {
+fn all_images(plugin: &NudePlugin) -> Option<Vec<ImageSummary>> {
     let docker = plugin.docker().ok()?;
-    let opts = ListImagesOptionsBuilder::default().build();
-    let images = plugin.rt.block_on(docker.list_images(Some(opts))).ok()?;
+    let opts = ListImagesOptionsBuilder::default().all(true).build();
+    plugin.rt.block_on(docker.list_images(Some(opts))).ok()
+}
+
+pub(crate) fn complete_refs(plugin: &NudePlugin) -> Option<Vec<DynamicSuggestion>> {
     Some(
-        images
+        all_images(plugin)?
             .iter()
             .flat_map(|i| i.repo_tags.iter())
             .filter(|t| t.as_str() != "<none>:<none>")
@@ -118,12 +120,6 @@ pub(crate) fn complete_refs(plugin: &NudePlugin) -> Option<Vec<DynamicSuggestion
             })
             .collect(),
     )
-}
-
-fn all_images(plugin: &NudePlugin) -> Option<Vec<ImageSummary>> {
-    let docker = plugin.docker().ok()?;
-    let opts = ListImagesOptionsBuilder::default().all(true).build();
-    plugin.rt.block_on(docker.list_images(Some(opts))).ok()
 }
 
 async fn run_list(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Result<Value> {
@@ -148,7 +144,7 @@ async fn run_list(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Result<V
     }
 
     let ids: Vec<String> = summaries.into_iter().map(|i| i.id).collect();
-    let inspected = skip_vanished(join_all(ids.iter().map(|id| docker.inspect_image(id))).await)?;
+    let inspected = inspect_each(ids.iter().map(|id| docker.inspect_image(id))).await?;
     let rows = inspected
         .iter()
         .map(|r| match fmt {
@@ -172,7 +168,12 @@ async fn run_inspect(plugin: &NudePlugin, call: &EvaluatedCall) -> anyhow::Resul
     })
 }
 
+/// `repo:tag` → `(repo, tag)`; a digest reference `repo@sha256:…` → `(repo, None)`.
+/// `<none>` and empty parts become `None`.
 fn split_ref(reference: &str) -> (Option<&str>, Option<&str>) {
+    if let Some((repo, _digest)) = reference.split_once('@') {
+        return (clean(repo), None);
+    }
     let (repo, tag) = reference.rsplit_once(':').unwrap_or((reference, ""));
     (clean(repo), clean(tag))
 }
@@ -181,16 +182,34 @@ fn clean(part: &str) -> Option<&str> {
     (!part.is_empty() && part != "<none>").then_some(part)
 }
 
+/// The `(repository, tag)` rows `docker images` prints for one image: one per tag; with no tags,
+/// one per repository it is known by digest; with neither, a single untagged row.
+fn image_refs(img: &ImageSummary) -> Vec<(Option<&str>, Option<&str>)> {
+    let mut refs: Vec<_> = img
+        .repo_tags
+        .iter()
+        .map(|r| split_ref(r))
+        .filter(|(_, tag)| tag.is_some())
+        .collect();
+    if refs.is_empty() {
+        for d in &img.repo_digests {
+            let r = split_ref(d);
+            if !refs.contains(&r) {
+                refs.push(r);
+            }
+        }
+    }
+    if refs.is_empty() {
+        refs.push((None, None));
+    }
+    refs
+}
+
 fn compact_rows(img: &ImageSummary, span: Span, show_labels: bool) -> Vec<Value> {
-    let refs: Vec<&str> = if img.repo_tags.is_empty() {
-        vec!["<none>:<none>"]
-    } else {
-        img.repo_tags.iter().map(String::as_str).collect()
-    };
     let id = short_id(&img.id);
-    refs.iter()
-        .map(|r| {
-            let (repository, tag) = split_ref(r);
+    image_refs(img)
+        .into_iter()
+        .map(|(repository, tag)| {
             let mut rec = Record::new();
             rec.push("repository", str_opt(repository, span));
             rec.push("tag", str_opt(tag, span));
@@ -247,7 +266,8 @@ fn wide(img: &ImageInspect, span: Span, show_labels: bool) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::split_ref;
+    use super::{image_refs, split_ref};
+    use bollard::models::ImageSummary;
 
     #[test]
     fn splits_repository_and_tag_at_the_last_colon() {
@@ -256,6 +276,45 @@ mod tests {
             split_ref("localhost:5000/team/img:v1.2"),
             (Some("localhost:5000/team/img"), Some("v1.2"))
         );
+    }
+
+    #[test]
+    fn digest_references_have_no_tag() {
+        assert_eq!(
+            split_ref(
+                "kindest/node@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5"
+            ),
+            (Some("kindest/node"), None)
+        );
+    }
+
+    fn image(tags: &[&str], digests: &[&str]) -> ImageSummary {
+        ImageSummary {
+            repo_tags: tags.iter().map(|s| (*s).to_string()).collect(),
+            repo_digests: digests.iter().map(|s| (*s).to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rows_follow_docker_images() {
+        // Tagged: one row per tag, digests ignored.
+        let img = image(&["nginx:1.27", "nginx:latest"], &["nginx@sha256:aa"]);
+        assert_eq!(
+            image_refs(&img),
+            [
+                (Some("nginx"), Some("1.27")),
+                (Some("nginx"), Some("latest"))
+            ]
+        );
+        // Pulled by digest, whichever field the daemon puts the reference in: repo, no tag.
+        let img = image(&["kindest/node@sha256:aa"], &["kindest/node@sha256:aa"]);
+        assert_eq!(image_refs(&img), [(Some("kindest/node"), None)]);
+        let img = image(&[], &["kindest/node@sha256:aa"]);
+        assert_eq!(image_refs(&img), [(Some("kindest/node"), None)]);
+        // Dangling: a single untagged row.
+        assert_eq!(image_refs(&image(&[], &[])), [(None, None)]);
+        assert_eq!(image_refs(&image(&["<none>:<none>"], &[])), [(None, None)]);
     }
 
     #[test]

@@ -1,6 +1,5 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
-    #[default]
     Compact,
     Wide,
     Full,
@@ -18,10 +17,10 @@ impl std::str::FromStr for OutputFormat {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "compact" => Ok(Self::Compact),
-            "wide" => Ok(Self::Wide),
-            "full" => Ok(Self::Full),
+        match Self::ALL.iter().position(|(name, _)| *name == s) {
+            Some(0) => Ok(Self::Compact),
+            Some(1) => Ok(Self::Wide),
+            Some(2) => Ok(Self::Full),
             _ => anyhow::bail!("unknown output format `{s}`: expected compact, wide or full"),
         }
     }

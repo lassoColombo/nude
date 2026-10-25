@@ -1,6 +1,8 @@
 use chrono::{TimeZone, Utc};
+use futures::{StreamExt, stream};
 use nu_protocol::{IntoValue, Record, Span, Value};
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
 
 pub fn epoch_date(secs: i64, span: Span) -> Value {
     match Utc.timestamp_opt(secs, 0) {
@@ -130,9 +132,13 @@ pub fn split_csv(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// Collects a fanned-out inspect. An object that vanished between `list` and `inspect` (404) is
-/// dropped like `docker` does; any other failure is a real error and surfaces.
-pub fn skip_vanished<T>(results: Vec<Result<T, bollard::errors::Error>>) -> anyhow::Result<Vec<T>> {
+/// Runs the fanned-out inspects a few at a time, in list order. An object that vanished between
+/// `list` and `inspect` (404) is dropped like `docker` does; any other failure surfaces.
+pub async fn inspect_each<T, Fut>(futs: impl IntoIterator<Item = Fut>) -> anyhow::Result<Vec<T>>
+where
+    Fut: Future<Output = Result<T, bollard::errors::Error>>,
+{
+    let results: Vec<_> = stream::iter(futs).buffered(16).collect().await;
     let mut out = Vec::with_capacity(results.len());
     for r in results {
         match r {
